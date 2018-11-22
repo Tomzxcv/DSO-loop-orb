@@ -59,6 +59,13 @@ public:
     PangolinDSOViewer(int w, int h, bool startRunThread=true);
 	virtual ~PangolinDSOViewer();
 
+    virtual int getAllFramePosesSize(){ return allFramePoses.size();}
+    virtual int getKeyframesSize(){ return keyframes.size();}
+    virtual void setToZero();
+    virtual void setKFiPose(int i, SE3 Tiw);
+	virtual void setCurrentPose(SE3 Tiw);
+    virtual void setNewfhPose(Vec3f v);
+
 	void run();
 	void close();
 

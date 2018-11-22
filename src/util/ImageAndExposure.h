@@ -26,6 +26,9 @@
 #include <cstring>
 #include <iostream>
 #include <opencv2/core/core.hpp>
+#include <opencv2/highgui/highgui.hpp>
+#include <string>
+#include <vector>
 
 namespace dso
 {
@@ -44,6 +47,7 @@ public:
 	{
 		image = new float[w*h];
 		image_mat = cv::Mat(h,w,CV_32FC1,image);
+
 		exposure_time=1;
 	}
 	inline ~ImageAndExposure()

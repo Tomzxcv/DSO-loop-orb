@@ -133,7 +133,7 @@ inline bool eigenTestNan(const MatXX &m, std::string msg)
 }
 
 
-static int num = 0;
+static int KF_num = 0;
 
 
 class FullSystem {
@@ -142,6 +142,10 @@ public:
 	FullSystem();
 	virtual ~FullSystem();
 
+
+    void saveAllKeyFrames();
+	void updataCov(FrameHessian* fh);
+	SE3 computeLastF_2_fhByFeatures(FrameHessian* fh, bool showDebug = false);
 	//DBow3 own
 	DBoW3::Vocabulary m_vocabulary;
 	DBoW3::Database   m_dataBase;
@@ -151,17 +155,18 @@ public:
     int loopCandidateId;
     int loopCurrentId;
 	bool hasLoop;
+    bool stop;
 
 	// adds a new frame, and creates point & residual structs.
 	void addActiveFrame(ImageAndExposure* image, int id);
 
 	// marginalizes a frame. drops / marginalizes points & residuals.
-	void marginalizeFrame(FrameHessian* frame);
+	void marginalizeFrame(FrameHessian* frame, std::ofstream* os);
 	void blockUntilMappingIsFinished();
 
 	float optimize(int mnumOptIts);
 
-	void printResult(std::string file);
+	void printResult(std::string file, bool isKeyFrame = false);
 
 	void debugPlot(std::string name);
 
@@ -183,10 +188,17 @@ private:
 
 	CalibHessian Hcalib;
 
-    void computeMatches(FrameShell* query, FrameShell* train,std::vector<cv::DMatch>& goodMatches);
+    void correctLoop(bool isDebug);
+
+    void computeMatches(cv::Mat& mat_query, cv::Mat& mat_train,std::vector<cv::DMatch>& goodMatches);
 
     void detectLoop(FrameHessian* fhLast);
 
+    g2o::Sim3 ComputeSim3RANSAC(cv::Mat& P1, cv::Mat& P2, int minInliers, int maxIterations,cv::Mat& K, std::vector<bool>& isInliersBest);
+
+    cv::Mat ComputeSim3(cv::Mat& P1, cv::Mat& P2);
+
+    void ChangePoints(const cv::Mat& P, cv::Mat& Pr, const cv::Mat& O);
 
 	inline float absf(float a)
 	{
@@ -262,6 +274,7 @@ private:
 
 	std::ofstream* coarseTrackingLog;
 
+    std::ofstream* covLog;
 	// statistics
 	long int statistics_lastNumOptIts;
 	long int statistics_numDroppedPoints;

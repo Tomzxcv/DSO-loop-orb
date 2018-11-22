@@ -73,16 +73,26 @@ FullSystem::FullSystem()
 {
 
     //read vocabulary own
+    printf("读取词典......\n");
     m_vocabulary = DBoW3::Vocabulary ("thirdparty/ORBvoc.txt");
     assert(!m_vocabulary.empty());
     m_dataBase.setVocabulary(m_vocabulary,false,0);
 
     orb = std::make_shared<ORBextractor>(ORBextractor(600,1.2f,8,50,20));
 
-	int loopCandidateId = -1;
-	int loopCurrentId = -1;
+	loopCandidateId = -1;
+	loopCurrentId = -1;
 
     hasLoop = false;
+	stop = false;
+
+	covLog = new std::ofstream();
+	covLog->open("logs/covLog.txt", std::ios::trunc | std::ios::out);
+	if(covLog) {
+		cout << endl << "success to open file" << endl;
+		covLog->clear();
+	}
+	covLog->precision(10);
 
 	int retstat =0;
 	if(setting_logStuff)
@@ -198,6 +208,7 @@ FullSystem::~FullSystem()
 
 	if(setting_logStuff)
 	{
+        covLog->close(); delete covLog;
 		calibLog->close(); delete calibLog;
 		numsLog->close(); delete numsLog;
 		coarseTrackingLog->close(); delete coarseTrackingLog;
@@ -212,7 +223,7 @@ FullSystem::~FullSystem()
 
 	delete[] selectionMap;
 
-	for(FrameShell* s : allFrameHistory)
+	for(FrameShell* s : allKeyFramesHistory)
     {
         for(ImmaturePoint * impt : s->mv_immatureKeypoints)
             delete impt;
@@ -264,7 +275,7 @@ void FullSystem::setGammaFunction(float* BInv)
 
 
 
-void FullSystem::printResult(std::string file)
+void FullSystem::printResult(std::string file, bool isKeyFrame)
 {
 	boost::unique_lock<boost::mutex> lock(trackMutex);
 	boost::unique_lock<boost::mutex> crlock(shellPoseMutex);
@@ -273,23 +284,65 @@ void FullSystem::printResult(std::string file)
 	myfile.open (file.c_str());
 	myfile << std::setprecision(15);
 
-	for(FrameShell* s : allFrameHistory)
+	if(isKeyFrame)
 	{
-		if(!s->poseValid) continue;
+		for(FrameShell* s : allKeyFramesHistory)
+		{
+			if(!s->poseValid) continue;
 
-		if(setting_onlyLogKFPoses && s->marginalizedAt == s->id) continue;
+			myfile << s->timestamp <<
+				   " " << s->camToWorld.translation().transpose()<<
+				   " " << s->camToWorld.so3().unit_quaternion().x()<<
+				   " " << s->camToWorld.so3().unit_quaternion().y()<<
+				   " " << s->camToWorld.so3().unit_quaternion().z()<<
+				   " " << s->camToWorld.so3().unit_quaternion().w() << "\n";
+		}
+	}
+	else
+	{
+		for(FrameShell* s : allFrameHistory)
+		{
+			if(!s->poseValid) continue;
 
-		myfile << s->timestamp <<
-			" " << s->camToWorld.translation().transpose()<<
-			" " << s->camToWorld.so3().unit_quaternion().x()<<
-			" " << s->camToWorld.so3().unit_quaternion().y()<<
-			" " << s->camToWorld.so3().unit_quaternion().z()<<
-			" " << s->camToWorld.so3().unit_quaternion().w() << "\n";
+			if(setting_onlyLogKFPoses && s->marginalizedAt == s->id) continue;
+
+			myfile << s->timestamp <<
+				   " " << s->camToWorld.translation().transpose()<<
+				   " " << s->camToWorld.so3().unit_quaternion().x()<<
+				   " " << s->camToWorld.so3().unit_quaternion().y()<<
+				   " " << s->camToWorld.so3().unit_quaternion().z()<<
+				   " " << s->camToWorld.so3().unit_quaternion().w() << "\n";
+		}
 	}
 	myfile.close();
 }
+//backup
+//void FullSystem::printResult(std::string file)
+//{
+//	boost::unique_lock<boost::mutex> lock(trackMutex);
+//	boost::unique_lock<boost::mutex> crlock(shellPoseMutex);
+//
+//	std::ofstream myfile;
+//	myfile.open (file.c_str());
+//	myfile << std::setprecision(15);
+//
+//	for(FrameShell* s : allFrameHistory)
+//	{
+//		if(!s->poseValid) continue;
+//
+//		if(setting_onlyLogKFPoses && s->marginalizedAt == s->id) continue;
+//
+//		myfile << s->timestamp <<
+//			   " " << s->camToWorld.translation().transpose()<<
+//			   " " << s->camToWorld.so3().unit_quaternion().x()<<
+//			   " " << s->camToWorld.so3().unit_quaternion().y()<<
+//			   " " << s->camToWorld.so3().unit_quaternion().z()<<
+//			   " " << s->camToWorld.so3().unit_quaternion().w() << "\n";
+//	}
+//	myfile.close();
+//}
 
-
+/*粗略计算fh的位姿，需要用到allFrameHistory的后两帧coarseTracker，和*/
 Vec4 FullSystem::trackNewCoarse(FrameHessian* fh)
 {
 
@@ -389,6 +442,17 @@ Vec4 FullSystem::trackNewCoarse(FrameHessian* fh)
 	{
 		AffLight aff_g2l_this = aff_last_2_l;
 		SE3 lastF_2_fh_this = lastF_2_fh_tries[i];
+        if(i == 5 && use_ORB_tracking) {
+			//boost::unique_lock<boost::mutex> crlock(shellPoseMutex);
+            SE3 T_cw = computeLastF_2_fhByFeatures(fh, true);
+			if(T_cw.data()) {
+				lastF_2_fh_this = T_cw * lastF->shell->camToWorld;
+				cout << "use orb tracking!" << endl;
+			}
+			else
+				cout<<"orb tracking SE3 is null"<<endl;
+        }
+
 		bool trackingIsGood = coarseTracker->trackNewestCoarse(
 				fh, lastF_2_fh_this, aff_g2l_this,
 				pyrLevelsUsed-1,
@@ -417,7 +481,7 @@ Vec4 FullSystem::trackNewCoarse(FrameHessian* fh)
 		// do we have a new winner?
 		if(trackingIsGood && std::isfinite((float)coarseTracker->lastResiduals[0]) && !(coarseTracker->lastResiduals[0] >=  achievedRes[0]))
 		{
-			//printf("take over. minRes %f -> %f!\n", achievedRes[0], coarseTracker->lastResiduals[0]);
+			printf("take over. minRes %f -> %f!\n", achievedRes[0], coarseTracker->lastResiduals[0]);
 			flowVecs = coarseTracker->lastFlowIndicators;
 			aff_g2l = aff_g2l_this;
 			lastF_2_fh = lastF_2_fh_this;
@@ -451,10 +515,11 @@ Vec4 FullSystem::trackNewCoarse(FrameHessian* fh)
 	lastCoarseRMSE = achievedRes;
 
 	// no lock required, as fh is not used anywhere yet.
+    //设置当前frame的位姿、reference和曝光参数
 	fh->shell->camToTrackingRef = lastF_2_fh.inverse();
 	fh->shell->trackingRef = lastF->shell;
 	fh->shell->aff_g2l = aff_g2l;
-	fh->shell->camToWorld = fh->shell->trackingRef->camToWorld * fh->shell->camToTrackingRef;
+	fh->shell->camToWorld = fh->shell->trackingRef->camToWorld * fh->shell->camToTrackingRef;//Twi=Twr*Tri
 
 
 	if(coarseTracker->firstCoarseRMSE < 0)
@@ -482,6 +547,7 @@ Vec4 FullSystem::trackNewCoarse(FrameHessian* fh)
 	return Vec4(achievedRes[0], flowVecs[0], flowVecs[1], flowVecs[2]);
 }
 
+//利用fh的信息，更新FrameHessian中点的信息
 void FullSystem::traceNewCoarse(FrameHessian* fh, bool isKeyFrame = false)
 {
 	boost::unique_lock<boost::mutex> lock(mapMutex);
@@ -517,15 +583,17 @@ void FullSystem::traceNewCoarse(FrameHessian* fh, bool isKeyFrame = false)
 
 			if(isKeyFrame)
 			{
-				if(ph->lastTraceStatus==ImmaturePointStatus::IPS_GOOD) fh->shell->mm_pointsSize[host->shell]++;
-				if(ph->lastTraceStatus==ImmaturePointStatus::IPS_OOB) fh->shell->mm_pointsSize[host->shell]++;
+				if(ph->lastTraceStatus==ImmaturePointStatus::IPS_GOOD ||
+				   ph->lastTraceStatus==ImmaturePointStatus::IPS_OOB)
+				{
+                    fh->shell->mm_pointsSize[host->shell]++;
+                    host->shell->mm_pointsSize[fh->shell]++;
+                }
 			}
 		}
 		/*own 追踪特征点*/
-		if(isKeyFrame) {
-			for (ImmaturePoint* ph : host->shell->mv_immatureKeypoints) {
-				ph->traceOn(fh, KRKi, Kt, aff, &Hcalib, false);
-			}
+		for (ImmaturePoint* ph : host->shell->mv_immatureKeypoints) {
+			ph->traceOn(fh, KRKi, Kt, aff, &Hcalib, false);
 		}
 	}
 //	printf("ADD: TRACE: %'d points. %'d (%.0f%%) good. %'d (%.0f%%) skip. %'d (%.0f%%) badcond. %'d (%.0f%%) oob. %'d (%.0f%%) out. %'d (%.0f%%) uninit.\n",
@@ -897,7 +965,7 @@ void FullSystem::addActiveFrame( ImageAndExposure* image, int id )
 			CoarseTracker* tmp = coarseTracker; coarseTracker=coarseTracker_forNewKF; coarseTracker_forNewKF=tmp;
 		}
 
-
+		//粗略计算fh位姿
 		Vec4 tres = trackNewCoarse(fh);
 		if(!std::isfinite((double)tres[0]) || !std::isfinite((double)tres[1]) || !std::isfinite((double)tres[2]) || !std::isfinite((double)tres[3]))
         {
@@ -906,6 +974,7 @@ void FullSystem::addActiveFrame( ImageAndExposure* image, int id )
             return;
         }
 
+        //判断是否需要添加关键帧
 		bool needToMakeKF = false;
 		if(setting_keyframesPerSecond > 0)
 		{
@@ -929,7 +998,7 @@ void FullSystem::addActiveFrame( ImageAndExposure* image, int id )
 
 
 
-
+        //发布当前帧fh的相机位姿
         for(IOWrap::Output3DWrapper* ow : outputWrapper)
             ow->publishCamPose(fh->shell, &Hcalib);
 
@@ -1078,10 +1147,505 @@ void FullSystem::makeNonKeyFrame( FrameHessian* fh)
 	delete fh;
 }
 
-void FullSystem::makeKeyFrame( FrameHessian* fh)
+void FullSystem::correctLoop(bool isDebug = true)
 {
-	num++;
+	//====================计算匹配=================
+    if(loopCurrentId == -1 || loopCandidateId == -1)
+        return;
 
+	std::vector<cv::DMatch> matches;
+	computeMatches(allKeyFramesHistory[loopCurrentId]->m_matDescriptor,allKeyFramesHistory[loopCandidateId]->m_matDescriptor,matches);
+	if(isDebug) printf("match size = %d\n",(int)matches.size());
+
+
+	if(matches.size()>=20)
+	{
+		//==================获取current 和loop的3D点=================
+		std::vector<Eigen::Vector3d,Eigen::aligned_allocator<Eigen::Vector3d>> vp3_WorldLoop;
+		std::vector<Eigen::Vector3d,Eigen::aligned_allocator<Eigen::Vector3d>> vp3_WorldCurrent;
+		std::vector<Eigen::Vector2d,Eigen::aligned_allocator<Eigen::Vector2d>> vp2_Loop;
+        std::vector<Eigen::Vector3d,Eigen::aligned_allocator<Eigen::Vector3d>> vp3_PuvdC;
+        std::vector<Eigen::Vector3d,Eigen::aligned_allocator<Eigen::Vector3d>> vp3_PuvdL;
+
+		if(isDebug)
+		{
+			std::cout<<"loop candidates depth pt size = "<<allKeyFramesHistory[loopCandidateId]->mv_immatureKeypoints.size()<<
+					 "  key size = "<<allKeyFramesHistory[loopCandidateId]->mv_Keypoints.size()<<std::endl;
+			std::cout<<"current depth pt size = "<<allKeyFramesHistory[loopCurrentId]->mv_immatureKeypoints.size()<<
+					 "  key size = "<<allKeyFramesHistory[loopCurrentId]->mv_Keypoints.size()<<std::endl;
+			//输出特征点对
+			for(int i=0;i<matches.size();i++)
+			{
+				cout<<i<<"  loop =  "<<allKeyFramesHistory[loopCandidateId]->mv_Keypoints[matches[i].trainIdx].pt<<"  current =  "<<
+					allKeyFramesHistory[loopCurrentId]->mv_Keypoints[matches[i].queryIdx].pt<<endl;
+			}
+		}
+		for(int i=0; i<matches.size(); )
+		{
+
+			ImmaturePoint* imptLoop = allKeyFramesHistory[loopCandidateId]->mv_immatureKeypoints[matches[i].trainIdx];
+			ImmaturePoint* imptCurrent = allKeyFramesHistory[loopCurrentId]->mv_immatureKeypoints[matches[i].queryIdx];
+
+			if(imptLoop == NULL || std::isnan(imptLoop->idepth_min) ||
+			   std::isnan(imptLoop->idepth_max) ||
+			   absf(imptLoop->idepth_max - imptLoop->idepth_min)>0.5 ||
+			   !imptLoop->idepth_max || !imptLoop->idepth_min)
+			{
+				cout<<"erase "<<i<<"   "<<imptLoop->idepth_max<<"   "<<imptLoop->idepth_min<<"  "<<
+					allKeyFramesHistory[loopCandidateId]->mv_Keypoints[matches[i].trainIdx].pt<<endl;
+				matches.erase(matches.begin()+i);
+				continue;
+			}
+
+
+			if(imptCurrent == NULL || std::isnan(imptCurrent->idepth_min) ||
+			   std::isnan(imptCurrent->idepth_max) ||
+			   absf(imptCurrent->idepth_max - imptCurrent->idepth_min)>0.5 ||
+			   !imptCurrent->idepth_max || !imptCurrent->idepth_min)
+			{
+				cout<<"erase "<<i<<"   "<<imptCurrent->idepth_max<<"   "<<imptCurrent->idepth_min<<"  "<<
+					allKeyFramesHistory[loopCurrentId]->mv_Keypoints[matches[i].queryIdx].pt<<endl;
+				matches.erase(matches.begin()+i);
+				continue;
+			}
+
+			/*p3 current*/
+			cv::Point2f p2current = allKeyFramesHistory[loopCurrentId]->mv_Keypoints[matches[i].queryIdx].pt;
+			double idepthC = (imptCurrent->idepth_min + imptCurrent->idepth_max)*0.5f;
+			Eigen::Vector3d p3Current((p2current.x-Hcalib.cxl())/(Hcalib.fxl()*idepthC),
+									  (p2current.y-Hcalib.cyl())/(Hcalib.fyl()*idepthC),
+									  1/idepthC);
+			if(isDebug)  cout<<i<<"   p2current = "<<p2current<<endl;
+			{
+				boost::unique_lock<boost::mutex> crlock(shellPoseMutex);
+				p3Current = allKeyFramesHistory[loopCurrentId]->camToWorld*p3Current;
+			}
+			vp3_WorldCurrent.push_back(p3Current);
+            vp3_PuvdC.push_back(Eigen::Vector3d(p2current.x, p2current.y, 1/idepthC));
+
+			/*p3 loop*/
+			cv::Point2f p2loop = allKeyFramesHistory[loopCandidateId]->mv_Keypoints[matches[i].trainIdx].pt;
+			double idepthL = (imptLoop->idepth_min + imptLoop->idepth_max)*0.5f;
+			Eigen::Vector3d p3Loop((p2loop.x-Hcalib.cxl())/(Hcalib.fxl()*idepthL),
+								   (p2loop.y-Hcalib.cyl())/(Hcalib.fyl()*idepthL),
+								   1/idepthL);
+			if(isDebug) cout<<i<<"   p2loop = "<<p2loop<<endl<<endl;
+			{
+				boost::unique_lock<boost::mutex> crlock(shellPoseMutex);
+				p3Loop = allKeyFramesHistory[loopCandidateId]->camToWorld*p3Loop;
+			}
+			vp3_WorldLoop.push_back(p3Loop);
+			vp2_Loop.push_back(Eigen::Vector2d(p2loop.x, p2loop.y));
+            vp3_PuvdL.push_back(Eigen::Vector3d(p2loop.x, p2loop.y, 1/idepthL));
+			++i;
+		}
+
+		//================优化=======================
+		if(vp3_WorldCurrent.size()>=10)
+		{
+			assert(vp3_WorldCurrent.size() == vp3_WorldLoop.size());
+
+			int size = vp3_WorldLoop.size();
+			cv::Mat matLoop(3,size,CV_64F), matCurrent(3,size,CV_64F);//3*n
+
+			for (int i = 0; i < 3; ++i) {/*只取3个点*/
+				double* Pl = matLoop.ptr<double>(i);
+				double* Pc = matCurrent.ptr<double>(i);
+				for (int j = 0; j < size; ++j) {
+					Pl[j] = vp3_WorldLoop[j][i];
+					Pc[j] = vp3_WorldCurrent[j][i];
+				}
+			}
+
+			if(isDebug)
+			{
+				printf("找到回环恢复出的loop 3D点为%d个，current 3D点为%d个\n",(int)vp3_WorldLoop.size(),(int)vp3_WorldCurrent.size());
+				std::string match = "match "+std::to_string(loopCandidateId)+"--"+std::to_string(loopCurrentId);
+				cv::Mat out;
+				cv::drawMatches(allKeyFramesHistory[loopCurrentId]->image_mat,allKeyFramesHistory[loopCurrentId]->mv_Keypoints,
+								allKeyFramesHistory[loopCandidateId]->image_mat,allKeyFramesHistory[loopCandidateId]->mv_Keypoints,matches,out);
+				cv::imshow(match,out);
+				cv::waitKey(100);
+			}
+			cv::Mat K = (cv::Mat_<double>(3,3)<< Hcalib.fxl(), 0, Hcalib.cxl(),
+					0,Hcalib.fyl(),Hcalib.cyl(),
+					0,0,1);
+			if(isDebug)
+			{
+				cout<<"K = "<<endl<<K<<endl;
+				cout<<"match size = "<<matches.size()<<"  point size = "<<matLoop.cols<<"   "<<matCurrent.cols<<endl;
+			}
+
+			std::vector<bool> isInliersBest(matCurrent.cols, false);
+			/*计算相对Sim3*/
+			g2o::Sim3 Scl = ComputeSim3RANSAC(matCurrent,matLoop,10,50,K,isInliersBest);
+
+			if(isDebug)
+			{
+				//current投影
+				printf("\n************************current projection**********************\n");
+				SE3 Tcw = allKeyFramesHistory[loopCurrentId]->camToWorld.inverse();
+				cv::Mat Rcw_mat = (cv::Mat_<double>(3, 3) <<
+                        Tcw.rotationMatrix()(0, 0), Tcw.rotationMatrix()(0, 1), Tcw.rotationMatrix()(0, 2),
+						Tcw.rotationMatrix()(1, 0), Tcw.rotationMatrix()(1, 1), Tcw.rotationMatrix()(1, 2),
+						Tcw.rotationMatrix()(2, 0), Tcw.rotationMatrix()(2, 1), Tcw.rotationMatrix()(2, 2));
+
+				cv::Mat Tcw_mat = (cv::Mat_<double>(3, 1) <<
+                        Tcw.translation()(0), Tcw.translation()(1), Tcw.translation()(2));
+
+				cv::resize(Tcw_mat, Tcw_mat, cv::Size(vp3_WorldLoop.size(), 3));
+
+				cv::Mat Pu_c = K * (Rcw_mat * matCurrent + Tcw_mat);
+				for (int i = 0; i < matCurrent.cols; ++i) {
+					cout << i << "   " << (Pu_c.col(i) / Pu_c.at<double>(2, i)).t() << endl;
+					cout << i << "   " << allKeyFramesHistory[loopCurrentId]->mv_Keypoints[matches[i].queryIdx].pt
+						 << endl << endl;
+				}
+
+				//loop投影
+				printf("\n************************loop projection**********************\n");
+				SE3 Tlw = allKeyFramesHistory[loopCandidateId]->camToWorld.inverse();
+				cv::Mat Rlw_mat = (cv::Mat_<double>(3, 3) << Tlw.rotationMatrix()(0, 0), Tlw.rotationMatrix()(0,
+																											  1), Tlw.rotationMatrix()(
+						0, 2),
+						Tlw.rotationMatrix()(1, 0), Tlw.rotationMatrix()(1, 1), Tlw.rotationMatrix()(1, 2),
+						Tlw.rotationMatrix()(2, 0), Tlw.rotationMatrix()(2, 1), Tlw.rotationMatrix()(2, 2));
+				cv::Mat Tlw_mat = (cv::Mat_<double>(3, 1) << Tlw.translation()(0), Tlw.translation()(
+						1), Tlw.translation()(2));
+				cv::resize(Tlw_mat, Tlw_mat, cv::Size(vp3_WorldLoop.size(), 3));
+
+				cv::Mat Pu_l = K * (Rlw_mat * matLoop + Tlw_mat);
+				for (int i = 0; i < matLoop.cols; ++i) {
+					cout << i << "   " << (Pu_l.col(i) / Pu_l.at<double>(2, i)).t() << endl;
+					cout << i << "   " << allKeyFramesHistory[loopCandidateId]->mv_Keypoints[matches[i].trainIdx].pt
+						 << endl << endl;
+				}
+
+				//loop=>current
+				printf("\n***********************loop to current projection**********************\n");
+				SE3 Tcl = SE3(Scl.rotation(), Scl.translation());
+				Tcl.rotationMatrix() * Scl.scale();
+				Mat44 Tc_cor = Tcl.matrix();//*Tlw.matrix()
+				cout << "Tc_cor = " << Tc_cor << endl;
+
+				cv::Mat Rc_cor = (cv::Mat_<double>(3, 3) <<
+														 Tc_cor(0, 0), Tc_cor(0, 1), Tc_cor(0, 2),
+						Tc_cor(1, 0), Tc_cor(1, 1), Tc_cor(1, 2),
+						Tc_cor(2, 0), Tc_cor(2, 1), Tc_cor(2, 2));
+				cv::Mat tc_cor = (cv::Mat_<double>(3, 1) << Tc_cor(0, 3), Tc_cor(1, 3), Tc_cor(2, 3));
+				cv::resize(tc_cor, tc_cor, cv::Size(vp3_WorldLoop.size(), 3));
+
+				cv::Mat Pu_c_corr = K * (Rc_cor * matLoop + tc_cor);
+				for (int i = 0; i < matCurrent.cols; ++i) {
+					cout << i << "   " << (Pu_c_corr.col(i) / Pu_c_corr.at<double>(2, i)).t() << endl;
+					cout << i << "   " << allKeyFramesHistory[loopCurrentId]->mv_Keypoints[matches[i].queryIdx].pt
+						 << endl << endl;
+				}
+
+
+				printf("\n********************after correct Sim3 loop to current projection**********************\n");
+				std::cout << "before optimization Sim =  loop " << loopCandidateId << "    current " << loopCurrentId
+						  << "    " << std::endl
+						  << Scl << std::endl;
+			}
+			Optimizer *optimizer = new Optimizer();
+            /*优化Sim3*/
+			g2o::Sim3 Scl_fixed = Scl;
+			//optimizer->OptimizeSim3(vp3_WorldCurrent, vp2_Loop, Scl, K, isInliersBest);//优化3D点
+            optimizer->OptimizeSim3(vp3_PuvdC,vp3_PuvdL,Scl,K,K,isInliersBest);//优化uvd
+			std::vector<Eigen::Vector3d,Eigen::aligned_allocator<Eigen::Vector3d>> vp3_PuvdC_copy;
+			std::vector<Eigen::Vector3d,Eigen::aligned_allocator<Eigen::Vector3d>> vp3_PuvdL_copy;
+            vp3_PuvdL_copy = vp3_PuvdL;
+            vp3_PuvdC_copy = vp3_PuvdC;
+			optimizer->OptimizeSim3(vp3_PuvdC_copy,vp3_PuvdL_copy,Scl_fixed,K,K,isInliersBest, true);//优化d
+
+            //优化uvd时误差输出
+            double error_duv = 0.0;
+            if(isDebug)
+            {
+                std::cout << "after  optimization Sim =  loop " << loopCandidateId << "    current " << loopCurrentId
+                          << "    " << std::endl
+                          << Scl << std::endl;
+                g2o::Sim3 Slc = Scl.inverse();
+                SE3 Tlc = SE3(Slc.rotation(), Slc.translation());
+                Tlc.rotationMatrix() * Slc.scale();
+                Mat44 Tl_cor_after = Tlc.matrix();//*Tlw.matrix()
+
+                cv::Mat Rc_cor_after = (cv::Mat_<double>(3, 3) <<
+                        Tl_cor_after(0, 0), Tl_cor_after(0, 1), Tl_cor_after(0, 2),
+                        Tl_cor_after(1, 0), Tl_cor_after(1, 1), Tl_cor_after(1, 2),
+                        Tl_cor_after(2, 0), Tl_cor_after(2, 1), Tl_cor_after(2, 2));
+                cv::Mat tc_cor_after = (cv::Mat_<double>(3, 1) << Tl_cor_after(0, 3), Tl_cor_after(1, 3), Tl_cor_after(2, 3));
+
+                int inlierNum = 0;
+                for (int i = 0; i < vp3_WorldCurrent.size(); ++i) {
+
+                    cv::Mat P3 = (cv::Mat_<double>(3, 1) <<
+                                    (vp3_PuvdC[i][0]-K.at<double>(0,2))*vp3_PuvdC[i][2]/K.at<double>(0,0),
+                                    (vp3_PuvdC[i][1]-K.at<double>(1,2))*vp3_PuvdC[i][2]/K.at<double>(1,1),
+                                     vp3_PuvdC[i][2]);
+                    cv::Mat Pu_c_corr_after = K * (Rc_cor_after * P3 + tc_cor_after);
+                    cv::Point2d p = allKeyFramesHistory[loopCandidateId]->mv_Keypoints[matches[i].trainIdx].pt;
+                    Pu_c_corr_after = Pu_c_corr_after / Pu_c_corr_after.at<double>(2,0);
+                    cout << i << "   is inlier = " << isInliersBest[i] << endl;
+                    cout << i << "   " << Pu_c_corr_after.t() << endl;
+                    cout << i << "   " << p << endl << endl;
+                    if(isInliersBest[i])
+                    {
+                        error_duv += (absf(Pu_c_corr_after.at<double>(0,0) - p.x) + absf(Pu_c_corr_after.at<double>(1,0) - p.y));
+                        inlierNum++;
+                    }
+                }
+                error_duv /= (double)inlierNum;
+                cout<<"optimize： loop + current + Sim3 error(inliersBest) = "<<error_duv<<"  inliers = "<<inlierNum<<endl<<endl;
+            }
+			//固定loop-uv，优化d时的误差
+            double error_d = 0.0;
+			if(isDebug)
+			{
+				std::cout << "after  optimization Sim =  loop " << loopCandidateId << "    current " << loopCurrentId
+						  << "    " << std::endl
+						  << Scl_fixed << std::endl;
+				g2o::Sim3 Slc = Scl_fixed.inverse();
+				SE3 Tlc = SE3(Slc.rotation(), Slc.translation());
+				Tlc.rotationMatrix() * Slc.scale();
+				Mat44 Tl_cor_after = Tlc.matrix();//*Tlw.matrix()
+
+				cv::Mat Rc_cor_after = (cv::Mat_<double>(3, 3) <<
+															   Tl_cor_after(0, 0), Tl_cor_after(0, 1), Tl_cor_after(0, 2),
+						Tl_cor_after(1, 0), Tl_cor_after(1, 1), Tl_cor_after(1, 2),
+						Tl_cor_after(2, 0), Tl_cor_after(2, 1), Tl_cor_after(2, 2));
+				cv::Mat tc_cor_after = (cv::Mat_<double>(3, 1) << Tl_cor_after(0, 3), Tl_cor_after(1, 3), Tl_cor_after(2, 3));
+
+				int inlierNum = 0;
+				for (int i = 0; i < vp3_WorldCurrent.size(); ++i) {
+
+					cv::Mat P3 = (cv::Mat_<double>(3, 1) <<
+							(vp3_PuvdC_copy[i][0]-K.at<double>(0,2))*vp3_PuvdC_copy[i][2]/K.at<double>(0,0),
+							(vp3_PuvdC_copy[i][1]-K.at<double>(1,2))*vp3_PuvdC_copy[i][2]/K.at<double>(1,1),
+							vp3_PuvdC_copy[i][2]);
+					cv::Mat Pu_c_corr_after = K * (Rc_cor_after * P3 + tc_cor_after);
+					cv::Point2d p = allKeyFramesHistory[loopCandidateId]->mv_Keypoints[matches[i].trainIdx].pt;
+					Pu_c_corr_after = Pu_c_corr_after / Pu_c_corr_after.at<double>(2,0);
+					cout << i << "   is inlier = " << isInliersBest[i] << endl;
+					cout << i << "   " << Pu_c_corr_after.t() << endl;
+					cout << i << "   " << p << endl << endl;
+					if(isInliersBest[i])
+					{
+						error_d += (absf(Pu_c_corr_after.at<double>(0,0) - p.x) + absf(Pu_c_corr_after.at<double>(1,0) - p.y));
+						inlierNum++;
+					}
+				}
+                error_d /= (double)inlierNum;
+				cout<<"optimize： current + Sim3 error(inliersBest) = "<<error_d<<"  inliers = "<<inlierNum<<endl<<endl;
+			}
+
+            Scl = error_d<error_duv? Scl_fixed:Scl;
+
+
+			if(isDebug)//优化3D点时误差输出
+			{
+				std::cout << "after  optimization Sim =  loop " << loopCandidateId << "    current " << loopCurrentId
+						  << "    " << std::endl
+						  << Scl << std::endl;
+				g2o::Sim3 Slc = Scl.inverse();
+				SE3 Tlc = SE3(Slc.rotation(), Slc.translation());
+				Tlc.rotationMatrix() * Slc.scale();
+				Mat44 Tl_cor_after = Tlc.matrix();//*Tlw.matrix()
+
+				cv::Mat Rc_cor_after = (cv::Mat_<double>(3, 3) <<
+						Tl_cor_after(0, 0), Tl_cor_after(0, 1), Tl_cor_after(0, 2),
+						Tl_cor_after(1, 0), Tl_cor_after(1, 1), Tl_cor_after(1, 2),
+						Tl_cor_after(2, 0), Tl_cor_after(2, 1), Tl_cor_after(2, 2));
+				cv::Mat tc_cor_after = (cv::Mat_<double>(3, 1) << Tl_cor_after(0, 3), Tl_cor_after(1, 3), Tl_cor_after(2, 3));
+
+
+				for (int i = 0; i < vp3_WorldCurrent.size(); ++i) {
+
+					cv::Mat P3 = (cv::Mat_<double>(3, 1) << vp3_WorldCurrent[i](0), vp3_WorldCurrent[i](1), vp3_WorldCurrent[i](2));
+					cv::Mat Pu_c_corr_after = K * (Rc_cor_after * P3 + tc_cor_after);
+					cout << i << "   is inlier = " << isInliersBest[i] << endl;
+					cout << i << "   " << (Pu_c_corr_after / Pu_c_corr_after.at<double>(2)).t() << endl;
+					cout << i << "   " << allKeyFramesHistory[loopCandidateId]->mv_Keypoints[matches[i].trainIdx].pt
+						 << endl << endl;
+				}
+			}
+
+			/*-*************************新的结构,用于回环矫正*******************************-*/
+			int N = loopCurrentId;//allKeyFramesHistory.size() - 1
+			std::vector<g2o::Sim3,Eigen::aligned_allocator<g2o::Sim3>> v_oldSim3(N-loopCandidateId+1);
+			std::vector<g2o::Sim3,Eigen::aligned_allocator<g2o::Sim3>> v_newSim3(N-loopCandidateId+1);
+			{
+				boost::unique_lock<boost::mutex> crlock(shellPoseMutex);
+				for (int i = loopCandidateId; i <= N; ++i) {
+					SE3 Tiw = allKeyFramesHistory[i]->camToWorld.inverse();
+					v_oldSim3[i-loopCandidateId] = g2o::Sim3(Tiw.unit_quaternion(), Tiw.translation(), 1.0);
+				}
+			}
+			std::list<Constraint> list_constrint;
+			int trans_id = 0;
+			for (int i = 1; i < v_oldSim3.size(); ++i) {
+				list_constrint.push_back(
+						Constraint(trans_id, trans_id+1,
+								   v_oldSim3[i]*v_oldSim3[i-1].inverse(),
+								   Mat77::Identity()));
+				++trans_id;
+			}
+			list_constrint.push_back(Constraint(trans_id, 0, Scl.inverse(), Mat77::Identity()));
+			//list_constrint.push_back(Constraint(loopCurrentId-loopCandidateId, 0, Scl.inverse(), Mat77::Identity()));
+
+			if(isDebug)  cout<<"old Sim3 size = "<<v_oldSim3.size()<<"  new Sim3 size = "<<v_newSim3.size()<<endl;
+
+			//=============优化====================
+			runMapping = false;
+			{
+				boost::unique_lock<boost::mutex> crlock(shellPoseMutex);
+
+				optimizer->LoopCorrect(v_oldSim3, v_newSim3, list_constrint);
+				//stop = true;
+
+				if(isDebug)
+				{
+                    printf("*********************old Sim3 and new Sim3*************************\n");
+					for (int i = 0; i < v_oldSim3.size(); ++i) {
+						cout<<i<<endl;
+						cout<<"v_oldSim3 = "<<v_oldSim3[i].log().transpose()<<endl;
+						cout<<"v_newSim3 = "<<v_newSim3[i].log().transpose()<<endl<<endl;
+					}
+				}
+				/*更新allKyeFramesHistory中的pose，并且转换要显示的keyframes中的pose，显示*/
+				for (int i = loopCandidateId; i <= N; ++i) {
+					SE3 Tiw(v_newSim3[i-loopCandidateId].rotation(),
+							v_newSim3[i-loopCandidateId].translation()/v_newSim3[i-loopCandidateId].scale());
+
+                    cout<<allKeyFramesHistory[i]->id<<endl;
+                    cout<<"before Twc = "<<allKeyFramesHistory[i]->camToWorld.log().transpose()<<endl;
+					allKeyFramesHistory[i]->camToWorld = Tiw.inverse();
+                    cout<<"after  Twc = "<<allKeyFramesHistory[i]->camToWorld.log().transpose()<<endl<<endl;
+					outputWrapper[0]->setKFiPose(i,Tiw);//显示的关键帧位姿
+					outputWrapper[0]->setCurrentPose(Tiw);//设置当前相机位姿
+				}
+
+				cout<<"all = "<<allKeyFramesHistory.size()<<" output size = "<<outputWrapper.size()<<endl;
+				cout<<"all frame= "<<outputWrapper[0]->getAllFramePosesSize()<<" all KeyFrame = "<<outputWrapper[0]->getKeyframesSize()<<endl;
+
+
+				/*更新普通帧allFrameHistory，进行位姿追踪时用*/
+				{
+					boost::unique_lock<boost::mutex> lock(trackMutex);
+					//更新最后的5帧
+					int N = allFrameHistory.size();
+					for(int i=1; i<= 5; ++i)
+					{
+						FrameShell* fh = allFrameHistory[N-i];
+						allFrameHistory[N-i]->camToWorld = fh->trackingRef->camToWorld * fh->camToTrackingRef;
+					}
+				}
+				/*更新Hessian中用于计算雅克比的位姿信息*/
+				{
+                    for (auto fH : frameHessians)
+                    {
+                        fH->PRE_camToWorld = fH->shell->camToWorld;
+                        fH->PRE_worldToCam = fH->PRE_camToWorld.inverse();
+                    }
+				}
+
+
+				/*矫正worldToCam_evalPT，这个是干嘛用的?*/
+				for (int i = 0; i < frameHessians.size(); ++i) {
+					frameHessians[i]->setEvalPT_scaled(frameHessians[i]->shell->camToWorld.inverse(),
+													   frameHessians[i]->shell->aff_g2l);
+				}
+
+                if(isDebug)
+                {
+                    //输出误差
+                    printf("\n************************error********************************\n");
+                    for (auto iter = list_constrint.begin(); iter!=list_constrint.end(); iter++) {
+
+                        g2o::Sim3 error_old=iter->mean*v_oldSim3[iter->id_1]*v_oldSim3[iter->id_2].inverse();
+                        g2o::Sim3 error_new=iter->mean*v_newSim3[iter->id_1]*v_newSim3[iter->id_2].inverse();
+                        cout<<"old = "<<error_old.log().transpose()<<endl;
+                        cout<<"new = "<<error_new.log().transpose()<<endl<<endl;
+                    }
+                    printf("****************over*********************************\n");
+                }
+
+			}
+
+			runMapping = true;
+            KF_num = 0;
+		}
+
+        else  hasLoop = false;
+
+	}
+    else  hasLoop = false;
+
+
+}
+
+
+void FullSystem::makeKeyFrame( FrameHessian* fh) {
+    KF_num++;
+
+//	for(ImmaturePoint* impt : allKeyFramesHistory.back()->mv_immatureKeypoints)
+//	{
+//		cout<<"min idepth = "<<impt->idepth_min<<"  max idepth = "<<impt->idepth_max<<endl;
+//	}
+
+    cout << "KF_num = " << KF_num << endl;
+
+//	if(KF_num == 20) {
+//        SE3 T_cw = computeLastF_2_fhByFeatures(fh, true);
+//        cout << T_cw << endl;
+//    }
+
+    /*计算当前图像与回环图像之间的匹配关系与sim3*/
+    if(hasLoop)//&& abs(loopCurrentId - allKeyFramesHistory.size())>3
+    {
+        cout<<"last KF location = "<<allKeyFramesHistory.back()<<endl;
+        cout<<"reference location = "<<fh->shell->trackingRef<<endl;
+        cout<<"loop = "<<loopCandidateId<<"  current = "<<loopCurrentId<<endl;
+        cout<<"bake fm = "<<allKeyFramesHistory.back()->id<<endl;
+        cout<<"loopCurrent id = "<<allKeyFramesHistory[loopCurrentId]->id<<endl;
+        cout<<"Tracker id = "<<coarseTracker->lastRef->shell->id<<endl;
+		cout<<"NweKF = "<<coarseTracker_forNewKF->lastRef->shell->id<<endl;
+		cout<<"fh id = "<<fh->shell->id<<endl;
+
+        int s = allFrameHistory.size() -1;
+        for(int i=s;i>s-3;--i)
+            cout<<"before  fh "<<i<<" = "<<allFrameHistory[i]->camToWorld.log().transpose()<<endl;
+        cout<<"before  fh Toreference pose = "<<fh->shell->camToTrackingRef.log().transpose()<<endl;
+        cout<<"before  fh reference id = "<<fh->shell->trackingRef->id<<endl;
+        cout<<"before  fh reference pose = "<<fh->shell->trackingRef->camToWorld.log().transpose()<<endl;
+        cout<<"before  fh pose = "<<fh->shell->camToWorld.log().transpose()<<endl;
+
+
+        correctLoop();
+        hasLoop = false;
+		loopCurrentId = loopCandidateId = -1;
+
+        /*需要重新估计fh的位姿*/
+        {
+            Vec4 tres = trackNewCoarse(fh);
+            if(!std::isfinite((double)tres[0]) || !std::isfinite((double)tres[1]) || !std::isfinite((double)tres[2]) || !std::isfinite((double)tres[3]))
+            {
+                printf("---Initial Tracking failed: LOST!\n");
+                isLost=true;
+                return;
+            }
+            //更新allFramePose中fh的位姿
+			Vec3 t = fh->shell->camToWorld.translation();
+            outputWrapper[0]->setNewfhPose(Vec3f(t.x(), t.y(), t.z()));
+        }
+        for(int i=s;i>s-3;--i)
+            cout<<"after   fh "<<i<<" = "<<allFrameHistory[i]->camToWorld.log().transpose()<<endl;
+		cout<<"after  fh Toreference pose = "<<fh->shell->camToTrackingRef.log().transpose()<<endl;
+        cout<<"after  fh reference id = "<<fh->shell->trackingRef->id<<endl;
+        cout<<"after  fh reference pose = "<<fh->shell->trackingRef->camToWorld.log().transpose()<<endl;
+		cout<<"after  fh pose = "<<fh->shell->camToWorld.log().transpose()<<endl;
+    }
     //extract ORB in KeyFrame own
     orb->operator()(fh->shell->image_mat,cv::Mat(),fh->shell->mv_Keypoints,fh->shell->m_matDescriptor);
 
@@ -1102,23 +1666,10 @@ void FullSystem::makeKeyFrame( FrameHessian* fh)
 		fh->setEvalPT_scaled(fh->shell->camToWorld.inverse(),fh->shell->aff_g2l);
 	}
 
-//    for (int j = 0; j < frameHessians.size(); ++j) {
-//        std::cout<<"frameHessians"<<j<<" = "<<frameHessians[j]->shell->mv_immatureKeypoints.size()<<std::endl;
-//    }
-
 	traceNewCoarse(fh, true);
 
 
 	boost::unique_lock<boost::mutex> lock(mapMutex);
-
-    //显示追踪点数量
-//    for(FrameShell* fms : allKeyFramesHistory)
-//    {
-//		cout<<endl<<"id = "<<fms->id<<"current = "<<fms<<endl;
-//		cout<<"map size = "<<fms->mm_pointsSize.size()<<endl;
-//        for(auto i = fms->mm_pointsSize.begin();i!=fms->mm_pointsSize.end();++i)
-//            cout<<"frame = "<<i->first<<"    pointSize = "<<i->second<<endl;
-//    }
 
 
     //=====================convert the descriptor to DBowVector and DataBases================
@@ -1126,7 +1677,7 @@ void FullSystem::makeKeyFrame( FrameHessian* fh)
 
     //=====================detect the loop candidates ======================================
 	//FrameHessian* fhLast = fh;
-    if(allKeyFramesHistory.size() > 10 && !hasLoop && num>20) {
+    if(allKeyFramesHistory.size() > 10 && !hasLoop && KF_num>50) {
 		detectLoop(fh);
 	}
     m_dataBase.add(fh->shell->m_matDescriptor);
@@ -1144,6 +1695,18 @@ void FullSystem::makeKeyFrame( FrameHessian* fh)
 	ef->insertFrame(fh, &Hcalib);
 
 	setPrecalcValues();
+
+	//更新协方差矩阵
+	updataCov(fh);
+
+	//显示追踪点数量
+//	for(FrameShell* fms : allKeyFramesHistory)
+//	{
+//		cout<<endl<<"id = "<<fms->id<<"current = "<<fms<<endl;
+//		cout<<"map size = "<<fms->mm_pointsSize.size()<<endl;
+//		for(auto i = fms->mm_pointsSize.begin();i!=fms->mm_pointsSize.end();++i)
+//			cout<<"frame = "<<i->first<<"    pointSize = "<<i->second<<endl;
+//	}
 
 
 	// =========================== add new residuals for old points =========================
@@ -1203,7 +1766,7 @@ void FullSystem::makeKeyFrame( FrameHessian* fh)
 	removeOutliers();
 
 
-	{
+	{//更新Tracker
 		boost::unique_lock<boost::mutex> crlock(coarseTrackerSwapMutex);
 		coarseTracker_forNewKF->makeK(&Hcalib);
 		coarseTracker_forNewKF->setCoarseTrackingRef(frameHessians);
@@ -1246,217 +1809,275 @@ void FullSystem::makeKeyFrame( FrameHessian* fh)
 
 	for(unsigned int i=0;i<frameHessians.size();i++)
 		if(frameHessians[i]->flaggedForMarginalization)
-			{marginalizeFrame(frameHessians[i]); i=0;}
+            {
+				marginalizeFrame(frameHessians[i], covLog);
+				i=0;
+            }
 
 
 	//printLogLine();
     //printEigenValLine();
 
-	//输出3种pose
-//	for (int j = 0; j < frameHessians.size(); ++j) {
-//		cout<<"*******PRE_worldToCam********"<<j<<endl;
-//		cout<<frameHessians[j]->PRE_worldToCam.rotationMatrix()<<frameHessians[j]->PRE_worldToCam.translation()<<endl;
-//		cout<<"*******worldToCam_evalPT********"<<j<<endl;
-//		cout<<frameHessians[j]->worldToCam_evalPT.rotationMatrix()<<frameHessians[j]->worldToCam_evalPT.translation()<<endl;
-//		cout<<"*******camToWorld inv********"<<j<<endl;
-//		cout<<frameHessians[j]->shell->camToWorld.inverse().rotationMatrix()<<frameHessians[j]->shell->camToWorld.inverse().translation()<<endl;
-//		cout<<endl;
-//	}
+}
 
 
-    /*计算当前图像与回环图像之间的匹配关系与sim3*/
-    if(hasLoop && abs(loopCurrentId - allKeyFramesHistory.size())>3)
+
+g2o::Sim3 FullSystem::ComputeSim3RANSAC(cv::Mat& P1, cv::Mat& P2, int minInliers, int maxIterations,cv::Mat& K, std::vector<bool>& isInliersBest)//S12
+{
+    assert(P1.data && P2.data);
+    int N = P1.cols;
+
+    float epsilon = (float)minInliers/N;
+    int IterNum = ceil(log(1-0.95)/log(1-pow(epsilon,3)));//迭代次数
+
+    int maxIterationNum = maxIterations<IterNum?maxIterations:IterNum;
+
+    int inliersNumBset = 0;
+    double errorBest = 10000000.0;
+
+    cv::Mat P1_3(3,3,CV_64F);
+    cv::Mat P2_3(3,3,CV_64F);
+    cv::RNG rng;
+    int iterTimes = 0;
+    /*迭代*/
+    while(iterTimes<maxIterationNum)
     {
+        iterTimes++;
+        std::vector<bool> isInliers(N,false);
+        int inliersNum = 0;
+        double error = 0.0;
+        //std::cout<<"iterTimes = "<<iterTimes<<std::endl;
 
-        //====================计算匹配
-        std::vector<cv::DMatch> matches;
-        computeMatches(allKeyFramesHistory[loopCurrentId],allKeyFramesHistory[loopCandidateId],matches);
+        //选择最小集合
+        for (int i = 0; i < 3; ++i) {
+            double k = rng.uniform(0.0,(double)(N-1));
+            //std::cout<<" k "<<i<<" = "<<k<<std::endl;
+            P1.col((int)k).copyTo(P1_3.col(i));
+            P2.col((int)k).copyTo(P2_3.col(i));
+        }
 
-        //==================获取current 和loop的3D点
-        std::vector<Eigen::Vector3d,Eigen::aligned_allocator<Eigen::Vector3d>> vp3_WorldLoop;
-        std::vector<Eigen::Vector3d,Eigen::aligned_allocator<Eigen::Vector3d>> vp3_WorldCurrent;
+        cv::Mat T12 = ComputeSim3(P1_3,P2_3);
 
-		cout<<"match size = "<<matches.size()<<endl;
-        if(matches.size()>=20)
+        /*检查内点*/
+        cv::Mat R12 = T12.colRange(0,3).rowRange(0,3);
+        cv::Mat t12 = T12.colRange(3,4).rowRange(0,3);
+        cv::resize(t12,t12,cv::Size(N,3));
+        //std::cout<<"R12 = "<<R12<<std::endl;
+        //std::cout<<"T12 = "<<t12<<std::endl;
+        //std::cout<<"P1_3 = "<<P1_3<<std::endl;
+        //std::cout<<"P2_3 = "<<P2_3<<std::endl;
+        //std::cout<<"P1 size = "<<P1.size()<<"  K size = "<<K.size()<<"  R12 size = "<<R12.size()<<"  t12 size = "<<t12.size()<<std::endl;
+        cv::Mat Pu1 = P1;
+        cv::Mat Pu2to1 = (R12*P2+t12);//project P2 in P1
+        //std::cout<<"Pu1 = "<<Pu1<<std::endl;
+        //std::cout<<"Pu2to1 = "<<Pu2to1<<std::endl;
+        //std::cout<<"Pu1 size = "<<Pu1.size()<<"  Pu2to1 size = "<<Pu2to1.size()<<std::endl;
+        assert(Pu1.cols == Pu2to1.cols && Pu2to1.cols == N);
+        for(int i=0; i<N; i++)
         {
-            std::cout<<"loop candidates ++++pt size = "<<allKeyFramesHistory[loopCandidateId]->mv_immatureKeypoints.size()<<
-					"idepth size = "<<allKeyFramesHistory[loopCandidateId]->mv_Keypoints.size()<<std::endl<<std::endl;
-			std::cout<<"current ++++pt size = "<<allKeyFramesHistory[loopCurrentId]->mv_immatureKeypoints.size()<<
-					 "idepth size = "<<allKeyFramesHistory[loopCurrentId]->mv_Keypoints.size()<<std::endl<<std::endl;
+//            std::cout<<"Pu1 = "<<i<<Pu1.col(i).t()<<std::endl;
+//            std::cout<<"Pu2 = "<<i<<Pu2to1.col(i).t()<<std::endl;
 
-            for(int i=0; i<matches.size(); i++)
+            double e = cv::norm(Pu1.col(i)-Pu2to1.col(i),cv::NORM_L2);
+            //std::cout<<"e->"<<i<<"  "<<e<<std::endl;
+            if(e < 1.2)//threhold 0.5
             {
-
-				ImmaturePoint* imptLoop = allKeyFramesHistory[loopCandidateId]->mv_immatureKeypoints[i];
-				ImmaturePoint* imptCurrent = allKeyFramesHistory[loopCurrentId]->mv_immatureKeypoints[i];
-
-				if(imptLoop == NULL || std::isnan(imptLoop->idepth_min) ||
-						std::isnan(imptLoop->idepth_max) ||
-						absf(imptLoop->idepth_max - imptLoop->idepth_min)>0.5 ||
-						!imptLoop->idepth_max || !imptLoop->idepth_min)
-					continue;
-
-				if(imptCurrent == NULL || std::isnan(imptCurrent->idepth_min) ||
-				   std::isnan(imptCurrent->idepth_max) ||
-				   absf(imptCurrent->idepth_max - imptCurrent->idepth_min)>0.5 ||
-				   !imptCurrent->idepth_max || !imptCurrent->idepth_min)
-					continue;
-
-				//p3 current
-				cv::Point2f p2current = allKeyFramesHistory[loopCurrentId]->mv_Keypoints[matches[i].queryIdx].pt;
-				double idepthC = (imptCurrent->idepth_min + imptCurrent->idepth_max)/2;
-				Eigen::Vector3d p3Current((p2current.x-Hcalib.cxl())/(Hcalib.fxl()*idepthC),
-									   (p2current.y-Hcalib.cyl())/(Hcalib.fyl()*idepthC),
-									   1/idepthC);
-				{
-					boost::unique_lock<boost::mutex> crlock(shellPoseMutex);
-					p3Current = allKeyFramesHistory[loopCurrentId]->camToWorld*p3Current;
-				}
-				vp3_WorldCurrent.push_back(p3Current);
-
-				//p3 loop
-				cv::Point2f p2loop = allKeyFramesHistory[loopCandidateId]->mv_Keypoints[matches[i].trainIdx].pt;
-				double idepthL = (imptLoop->idepth_min + imptLoop->idepth_max)/2;
-				Eigen::Vector3d p3Loop((p2loop.x-Hcalib.cxl())/(Hcalib.fxl()*idepthL),
-									   (p2loop.y-Hcalib.cyl())/(Hcalib.fyl()*idepthL),
-										1/idepthL);
-                {
-                    boost::unique_lock<boost::mutex> crlock(shellPoseMutex);
-                    p3Loop = allKeyFramesHistory[loopCandidateId]->camToWorld*p3Loop;
-                }
-				vp3_WorldLoop.push_back(p3Loop);
-
-				//cout<<p3Loop.transpose()<<endl;
-                //cout<<i<<"   current = "<<p3Current.transpose()<<"   loop = "<<p3Loop.transpose()<<endl;
+                isInliers[i] = true;
+                inliersNum++;
+                error += e;
             }
+        }
+        error /= inliersNum;
+        printf("**  *iterTimes = %d, error = %f,  inliers num = %d*****************\n",iterTimes,error,inliersNum);
 
-			if(vp3_WorldCurrent.size()>=10)
-			{
-				assert(vp3_WorldCurrent.size() == vp3_WorldLoop.size());
+        if(inliersNum > inliersNumBset)//error < errorBest && inliersNum > 3
+        {
+            isInliersBest = isInliers;
+            inliersNumBset = inliersNum;
+            errorBest = error;
+        }
 
-				int size = vp3_WorldLoop.size();
-				cv::Mat matLoop(3,size,CV_64F), matCurrent(3,size,CV_64F);//3*n
+        if(inliersNum > 0.8*N)
+            iterTimes += 10;
 
-				for (int i = 0; i < 3; ++i) {
-					double* Pl = matLoop.ptr<double>(i);
-					double* Pc = matCurrent.ptr<double>(i);
-					for (int j = 0; j < size; ++j) {
-						Pl[j] = vp3_WorldLoop[j][i];
-						Pc[j] = vp3_WorldCurrent[j][i];
-					}
-				}
+    }
 
-                //cout<<"matLoop"<<matLoop<<endl;
-				printf("找到回环恢复出的loop 3D点为%d个，current 3D点为%d个\n",(int)vp3_WorldLoop.size(),(int)vp3_WorldCurrent.size());
-				std::string match = "match "+std::to_string(loopCandidateId)+"--"+std::to_string(loopCurrentId);
-				cv::Mat out;
-				cv::drawMatches(allKeyFramesHistory[loopCurrentId]->image_mat,allKeyFramesHistory[loopCurrentId]->mv_Keypoints,
-								allKeyFramesHistory[loopCandidateId]->image_mat,allKeyFramesHistory[loopCandidateId]->mv_Keypoints,matches,out);
-				cv::imshow(match,out);
-				cv::waitKey(100);
+    /*用所有内点，重新计算Sim3*/
+    if(inliersNumBset < 3)
+    {
+        printf("there are two few inliners\n");
+        return g2o::Sim3();
+    } else{
 
-				//=============优化
-				Optimizer *optimizer = new Optimizer();
-				optimizer->LoopCorrect(allKeyFramesHistory,loopCandidateId,loopCurrentId,matLoop,matCurrent);
+        cv::Mat P1best(3,inliersNumBset,CV_64F);
+        cv::Mat P2best(3,inliersNumBset,CV_64F);
+        for (int i = 0,j=0; i < N; ++i) {
+            if(isInliersBest[i])
+            {
+                P1.col(i).copyTo(P1best.col(j));
+                P2.col(i).copyTo(P2best.col(j));
+                j++;
+            }
+        }
+        cv::Mat bestP12 = ComputeSim3(P1best,P2best);
+        //std::cout<<"bestP12 = "<<bestP12<<std::endl;
 
-				/*矫正worldToCam_evalPT*/
-				for (int i = 0; i < frameHessians.size(); ++i) {
-					frameHessians[i]->setEvalPT_scaled(frameHessians[i]->shell->camToWorld.inverse(),frameHessians[i]->shell->aff_g2l);
-				}
-			}
+        cv::Mat sR = bestP12.colRange(0,3).rowRange(0,3);
+        cv::Mat t = bestP12.colRange(3,4).rowRange(0,3);
 
-//        cv::Mat R,t;
-//        if(vp2_current.size()>=20)
-//        {
-//            std::string match = "match "+std::to_string(loopCandidate)+"--"+std::to_string(allKeyFramesHistory.size()-1);
-//			cv::Mat out;
-//			cv::drawMatches(fhLast->shell->image_mat,fhLast->shell->mv_Keypoints,allKeyFramesHistory[loopCandidate]->image_mat,allKeyFramesHistory[loopCandidate]->mv_Keypoints,matches,out);
-//			cv::imshow(match,out);
-//			cv::waitKey(100);
-//
-//            assert(vp2_current.size() == vp3_World.size());
-//            //PnP solve
-//            cv::Mat_<double>K(3,3);
-//            K << Hcalib.fxl(), 0, Hcalib.cxl(),
-//                 0,Hcalib.fyl(),Hcalib.cyl(),
-//                 0,0,1;
-//            cv::Mat r,inliner;
-//            auto start = std::chrono::steady_clock::now();
-//            cv::solvePnPRansac(vp3_World,vp2_current,K,cv::Mat(),r,t,false,100,8.0,vp3_World.size()*0.7,inliner,cv::EPNP);
-//            auto end = std::chrono::steady_clock::now();
-//            std::chrono::duration<double> diff = end-start;
-//            std::cout << "=>Time Elapse " << diff.count()*1000 << " ms" << std::endl;
-//            cv::Rodrigues(r,R);
-//            std::cout<<"K "<<K<<std::endl<<"R "<<R<<std::endl<<"   t"<<t<<std::endl;
-//
-//
-//			Eigen::Matrix3d R_mat;
-//			R_mat << R.at<double>(0,0), R.at<double>(0,1), R.at<double>(0,2),
-//					 R.at<double>(1,0), R.at<double>(1,1), R.at<double>(1,2),
-//					 R.at<double>(2,0), R.at<double>(2,1), R.at<double>(2,2);
-//			Eigen::Vector3d t_vec;
-//			t_vec << t.at<double>(0),t.at<double>(1),t.at<double>(2);
-//
-//			//std::cout<<R<<std::endl<<R_mat<<std::endl<<t<<std::endl<<t_vec<<std::endl;
-//			boost::unique_lock<boost::mutex> crlock(shellPoseMutex);
-//
-////            std::cout<<"fhcurrent1  ==  "<<fhLast->shell<<std::endl;
-////            std::cout<<"fhcurrent2  ==  "<<allKeyFramesHistory[allKeyFramesHistory.size()-1]<<std::endl;
-////			for(FrameShell* fs : allKeyFramesHistory)
-////				std::cout<<"fhs  ==  "<<fs<<std::endl;
-//
-//			//===================优化前误差
-//			SE3 Tcl(R_mat,t_vec);
-//			SE3 T = Tcl*allKeyFramesHistory[loopCandidateId]->camToWorld.inverse()*allKeyFramesHistory[allKeyFramesHistory.size()-1]->camToWorld;
-//            std::cout<<"before opt e = " << T.translation().transpose()<<
-//									  " " << T.so3().unit_quaternion().x()<<
-//									  " " << T.so3().unit_quaternion().y()<<
-//									  " " << T.so3().unit_quaternion().z()<<
-//									  " " << T.so3().unit_quaternion().w() << "\n";
-//
-//			Optimizer::LoopCorrect(allKeyFramesHistory, loopCandidateId,allKeyFramesHistory.size()-1,R_mat,t_vec);
-//
-//			/*矫正worldToCam_evalPT*/
-//			for (int i = 0; i < frameHessians.size(); ++i) {
-//				frameHessians[i]->setEvalPT_scaled(frameHessians[i]->shell->camToWorld.inverse(),frameHessians[i]->shell->aff_g2l);
-//			}
-//
-//			//====================优化后误差
-//			T = Tcl*allKeyFramesHistory[loopCandidateId]->camToWorld.inverse()*allKeyFramesHistory[allKeyFramesHistory.size()-1]->camToWorld;
-//			std::cout<<"after opt e = " << T.translation().transpose()<<
-//					 " " << T.so3().unit_quaternion().x()<<
-//					 " " << T.so3().unit_quaternion().y()<<
-//					 " " << T.so3().unit_quaternion().z()<<
-//					 " " << T.so3().unit_quaternion().w() << "\n";
+        double scale = cv::norm(sR.col(0));//和算出来的scale不同
+        sR = sR/scale;
 
-//			for(int i=0;i<allKeyFramesHistory.size();i++)
-//			{
-//				FrameShell* fms = allKeyFramesHistory[i];
-//				printf("*****allKeyFramesHistory********%d*******id = %d*********",i,fms->id);
-//				std::cout<<fms<<std::endl;
-//				cout<<fms->camToWorld.rotationMatrix()<<fms->camToWorld.translation()<<endl;
-//			}
-//
-//			cout<<endl<<endl;
-//			for(int i=0;i<frameHessians.size();i++)
-//			{
-//				FrameHessian* fmh = frameHessians[i];
-//				printf("*****frameHessians********%d*********id = %d*******",i,fmh->shell->id);
-//				cout<<fmh->shell<<endl;
-//				cout<<fmh->shell->camToWorld.rotationMatrix()<<fmh->shell->camToWorld.translation()<<endl;
-//			}
 
-            //std::cout<<"after opt = "<<allKeyFramesHistory[allKeyFramesHistory.size()-1]->camToWorld.inverse().rotationMatrix()<<std::endl;
-            //std::cout<<"after opt = "<<allKeyFramesHistory[allKeyFramesHistory.size()-1]->camToWorld.inverse().translation()<<std::endl;
-		}
+        Mat33 R12;
+        R12 <<  sR.at<double>(0,0),sR.at<double>(0,1),sR.at<double>(0,2),
+                sR.at<double>(1,0),sR.at<double>(1,1),sR.at<double>(1,2),
+                sR.at<double>(2,0),sR.at<double>(2,1),sR.at<double>(2,2);
+        Eigen::Vector3d T12(t.at<double>(0,0),t.at<double>(1,0),t.at<double>(2,0));
 
-		loopCurrentId = loopCandidateId = -1;
-		hasLoop = false;
-		num = 0;
+        printf("\n**********************************************************\n");
+        printf("best Sim R det = %f,  scale =  %f,  error = %f,  inlinersNum = %d, allNum = %d \n",cv::determinant(sR),scale,errorBest,inliersNumBset,P1.cols);
+
+
+        std::cout<<"T12 best points====================="<<std::endl;
+
+        cv::resize(t,t,cv::Size(inliersNumBset,3));
+        //cout<<"sR"<<sR<<endl<<"t"<<t<<endl;
+        cout<<"R12"<<R12<<endl<<"T12"<<T12<<endl;
+        cv::Mat P1_2 = sR*P2best + t;
+        for(int i=0,j=0;i<P1.cols; i++)
+        {
+            if(isInliersBest[i])
+            {
+                std::cout<<i<<" P1   "<<P1best.col(j).t()<<std::endl;
+                std::cout<<i<<" P1_2 "<<P1_2.col(j).t()<<std::endl<<std::endl;
+                j++;
+            }
+        }
+
+        return g2o::Sim3(R12,T12,scale);
     }
 }
 
 
+cv::Mat FullSystem::ComputeSim3(cv::Mat& P1, cv::Mat& P2)
+{
+    // Horn 1987, Closed-form solution of absolute orientataion using unit quaternions
+
+    //-1- compute centroid and relative coordinates
+    assert(P1.type() == P2.type() && P1.cols>=3 && P2.cols>=3);
+
+    cv::Mat Pr1(P1.size(),P1.type());//relative coordinates
+    cv::Mat Pr2(P2.size(),P2.type());
+    cv::Mat O1(3,1,P1.type());       //centroid
+    cv::Mat O2(3,1,P2.type());
+
+    ChangePoints(P1,Pr1,O1);
+    ChangePoints(P2,Pr2,O2);
+
+//    std::cout<<"Pr1"<<Pr1<<std::endl;
+//    std::cout<<"Pr2"<<Pr2<<std::endl;
+//    std::cout<<"O1"<<O1<<std::endl;
+//    std::cout<<"O2"<<O2<<std::endl;
+
+    //-2- compute M
+    cv::Mat M = Pr2*Pr1.t();//T 2->1
+
+    //-3- compute N
+    double N11,N12,N13,N14,N22,N23,N24,N33,N34,N44;
+    N11 = M.at<double>(0,0) + M.at<double>(1,1) + M.at<double>(2,2);
+    N12 = M.at<double>(1,2) - M.at<double>(2,1);
+    N13 = M.at<double>(2,0) - M.at<double>(0,2);
+    N14 = M.at<double>(0,1) - M.at<double>(1,0);
+    N22 = M.at<double>(0,0) - M.at<double>(1,1) - M.at<double>(2,2);
+    N23 = M.at<double>(0,1) + M.at<double>(1,0);
+    N24 = M.at<double>(2,0) + M.at<double>(0,2);
+    N33 = -M.at<double>(0,0) + M.at<double>(1,1) - M.at<double>(2,2);
+    N34 = M.at<double>(2,1) + M.at<double>(1,2);
+    N44 = -M.at<double>(0,0) - M.at<double>(1,1) + M.at<double>(2,2);
+
+    //std::cout<<N11<<"  "<<N12<<"  "<<N13<<"  "<<N14<<"  "<<N22<<"  "<<N23<<"  "<<N24<<"  "<<N33<<"  "<<N34<<"  "<<N44<< std::endl;
+
+    cv::Mat N = (cv::Mat_<double>(4,4)<< N11, N12, N13, N14,
+            N12, N22, N23, N24,
+            N13, N23, N33, N34,
+            N14, N24, N34, N44);
+
+
+    //-4- compute eigenvector of hightest eigenvalue
+    cv::Mat eigVal,eigVec;
+    cv::eigen(N,eigVal,eigVec);
+
+    cv::Mat RotationVec(1,3,eigVec.type());
+    (eigVec.row(0).colRange(1,4)).copyTo(RotationVec);
+
+    double angle = atan2(norm(RotationVec),eigVec.at<double>(0,0));//计算旋转角度
+
+    RotationVec = 2*angle*RotationVec/norm(RotationVec);//旋转向量，模代表角度，单位向量代表方向
+
+    cv::Mat R12(3,3,P1.type());
+    cv::Rodrigues(RotationVec,R12);
+
+    //-5- Rotate set 2
+    cv::Mat P3 = R12*Pr2;
+
+    //-6- compute scale
+    double A = Pr1.dot(P3);
+    cv::Mat Pr2Square = Pr2*Pr2.t();
+    double B = cv::trace(Pr2Square)(0);
+    double scale = A/B;
+
+
+    //-7- compute translation
+    cv::Mat t12(3,1,P2.type());
+    t12 = O1 - scale*R12*O2;
+
+    //-8- transformation
+    cv::Mat T12 = cv::Mat::eye(4,4,P1.type());
+    cv::Mat sR = scale*R12;
+
+
+    sR.copyTo(T12.rowRange(0,3).colRange(0,3));
+    t12.copyTo(T12.rowRange(0,3).col(3));
+
+
+    printf("computeSim3 scale = %f  ,det R = %f\n",scale,cv::determinant(sR)/(pow(scale,3)));
+
+//    std::cout<<"T12====================="<<std::endl;
+//    cv::resize(t12,t12,cv::Size(P2.cols,3));
+//    cv::Mat P1_ = sR*P2 + t12;
+//    for(int i=0;i<P1.cols; i++)
+//    {
+//        std::cout<<i<<" P1 "<<P1.col(i).t()<<std::endl;
+//        std::cout<<i<<" P1_2 "<<P1_.col(i).t()<<std::endl<<std::endl;
+//    }
+
+
+
+//    //-8- Sim3
+//    Mat33 R;
+//    R <<  R12.at<double>(0,0),R12.at<double>(0,1),R12.at<double>(0,2),
+//          R12.at<double>(1,0),R12.at<double>(1,1),R12.at<double>(1,2),
+//          R12.at<double>(2,0),R12.at<double>(2,1),R12.at<double>(2,2);
+//    Eigen::Vector3d t(t12.at<double>(0,0),t12.at<double>(1,0),t12.at<double>(2,0));
+//
+//    g2o::Sim3 S12(R,t,scale1);
+    //std::cout<<"T12"<<T12<<std::endl;
+    return T12;
+
+}
+
+void FullSystem::ChangePoints(const cv::Mat& P, cv::Mat& Pr, const cv::Mat& O)
+{
+    assert(P.data && Pr.data && O.data);
+
+    cv::reduce(P,O,1,CV_REDUCE_AVG);
+
+    for(int i=0; i<P.cols; ++i)
+    {
+        Pr.col(i) = P.col(i) - O;
+    }
+}
 
 
 void FullSystem::detectLoop(FrameHessian* fhLast)
@@ -1521,14 +2142,14 @@ void FullSystem::detectLoop(FrameHessian* fhLast)
 }
 
 
-void FullSystem::computeMatches(FrameShell* query, FrameShell* train,std::vector<cv::DMatch>& goodMatches)
+void FullSystem::computeMatches(cv::Mat& mat_query, cv::Mat& mat_train,std::vector<cv::DMatch>& goodMatches)
 {
-	assert(query!=NULL);
-	assert(train!=NULL);
+	assert(mat_query.data);
+	assert(mat_train.data);
     //匹配
     cv::BFMatcher matcher(cv::NORM_HAMMING);
     std::vector<cv::DMatch> matches;
-    matcher.match(query->m_matDescriptor,train->m_matDescriptor,matches);
+    matcher.match(mat_query,mat_train,matches);
 
 	if(matches.size() == 0)
 		return;
@@ -1540,20 +2161,213 @@ void FullSystem::computeMatches(FrameShell* query, FrameShell* train,std::vector
             min = i.distance;
     }
     printf("描述子最小距离为%d\n",min);
-    for(cv::DMatch i : matches)
+	int threshold = 30<(3*min)?30:(3*min);
+	//去除trainIdx中重复元素
+	if(matches[0].distance < threshold)
+		goodMatches.push_back(matches[0]);
+    for(int i=1; i<matches.size(); ++i)
     {
-        int threshold = 30<(3*min)?30:(3*min);
-        if(i.distance < threshold)
-            goodMatches.push_back(i);
+        if(matches[i].distance < threshold && matches[i].trainIdx != matches[i-1].trainIdx)
+            goodMatches.push_back(matches[i]);
     }
 //    cv::Mat out;
 //    cv::drawMatches(query->image_mat,query->mv_Keypoints,train->image_mat,train->mv_Keypoints,goodMatches,out);
 //    cv::imshow("match",out);
 //    cv::waitKey(20);
+	return;
+}
+
+void FullSystem::saveAllKeyFrames()
+{
+	static int num = 0;
+	std::ofstream* os= new std::ofstream();
+	os->open("logs/keyframes.txt", std::ios::trunc | std::ios::out);
+	if(os) {
+		cout << endl << "success to open keyframes.txt file" << endl;
+		os->clear();
+	}
+	os->precision(10);
+
+	boost::unique_lock<boost::mutex> lock(mapMutex);
+	for(FrameShell* fm : allKeyFramesHistory)
+        if(fm && fm->trackingRef)
+		    (*os)<<"第"<<num++<<"个  "<<"current id = "<<fm->id<<"   reference id = "<<fm->trackingRef->id<<endl;
+
+	os->close();
+	delete os;
 }
 
 
+//updata all keyframes‘ cov in frameHessians
+void FullSystem::updataCov(FrameHessian* fh)
+{
+	//compute cov
+	if (fh->shell->trackingRef != NULL) {
 
+		(*covLog) << "current id = " << fh->shell->id << "   reference id = "
+				  << fh->shell->trackingRef->id << endl;
+		(*covLog) << "before reference cov = "
+				  << fh->shell->trackingRef->m_cov(0, 0) << "  "
+				  << fh->shell->trackingRef->m_cov(1, 1) << "  "
+				  << fh->shell->trackingRef->m_cov(2, 2) << "  "
+				  << fh->shell->trackingRef->m_cov(3, 3) << "  "
+				  << fh->shell->trackingRef->m_cov(4, 4) << "  "
+				  << fh->shell->trackingRef->m_cov(5, 5) << "  " << endl;
+
+		Mat66 adj = fh->shell->camToTrackingRef.inverse().Adj();
+
+		fh->shell->m_cov = Mat66::Identity() / 20. + adj * fh->shell->trackingRef->m_cov * adj.transpose();
+
+		(*covLog) << "after cov = "
+				  << fh->shell->m_cov(0, 0) << "  "
+				  << fh->shell->m_cov(1, 1) << "  "
+				  << fh->shell->m_cov(2, 2) << "  "
+				  << fh->shell->m_cov(3, 3) << "  "
+				  << fh->shell->m_cov(4, 4) << "  "
+				  << fh->shell->m_cov(5, 5) << "  " << endl << endl << endl;
+
+
+
+	} else
+		(*covLog) << fh->shell->id << "  reference is null" << endl;
+
+	return;
+}
+
+
+SE3 FullSystem::computeLastF_2_fhByFeatures(FrameHessian* fh, bool showDebug)
+{
+	if(fh == nullptr)
+		return SE3();
+
+	//extract ORB in current frame
+	orb->operator()(fh->shell->image_mat,cv::Mat(),fh->shell->mv_Keypoints,fh->shell->m_matDescriptor);
+
+
+	//make descriptor of all frameHessians
+    assert(frameHessians.size() >= 1);
+    std::vector<int> vIndex(frameHessians.size());
+	cv::Mat all_frame_descriptor;
+    frameHessians[0]->shell->m_matDescriptor.copyTo(all_frame_descriptor);
+    vIndex[0] = frameHessians[0]->shell->m_matDescriptor.rows - 1;
+
+	if(!all_frame_descriptor.data)
+		return SE3();
+
+	for(int i=1; i<frameHessians.size(); i++){
+		cv::copyMakeBorder(all_frame_descriptor, all_frame_descriptor,0,frameHessians[i]->shell->m_matDescriptor.rows,0,0,cv::BORDER_CONSTANT);
+
+        frameHessians[i]->shell->m_matDescriptor.copyTo(
+                all_frame_descriptor.rowRange(
+                        all_frame_descriptor.rows - frameHessians[i]->shell->m_matDescriptor.rows,
+                        all_frame_descriptor.rows));
+        vIndex[i] = vIndex[i-1] + frameHessians[i]->shell->m_matDescriptor.rows;
+
+		if(showDebug)
+        	cout<<"vIndex "<<i<<" = "<<vIndex[i]<<endl;
+	}
+	if(showDebug)
+    	cout<<"all_frame_descriptor size = "<<all_frame_descriptor.rows<<"  "<<all_frame_descriptor.cols<<endl;
+
+    std::vector<cv::DMatch> goodMatches;
+    computeMatches(fh->shell->m_matDescriptor, all_frame_descriptor, goodMatches);
+
+	if(showDebug) {
+		cout << "find " << goodMatches.size() << " matches" << endl;
+		for (auto i : goodMatches) {
+			cout << "trainId = " << i.trainIdx << "  queryId = " << i.queryIdx << "  distance = " << i.distance << endl;
+			cout << "train = " << all_frame_descriptor.row(i.trainIdx) << "  query = "
+				 << fh->shell->m_matDescriptor.row(i.queryIdx) << endl;
+		}
+	}
+    cout<<"*****************************************************************"<<endl;
+
+	std::vector<cv::Point2f> vp2(goodMatches.size());
+	std::vector<cv::Point3f> vp3(goodMatches.size());
+
+    std::vector<std::vector<cv::DMatch>> all_matches(frameHessians.size());
+    for(int i=0; i<goodMatches.size(); i++){
+        int train_id = goodMatches[i].trainIdx - 1;
+        int i_index = 0;
+        while (train_id >= vIndex[i_index])
+            i_index++;
+
+
+		int temp_trainId = train_id;
+		if(i_index > 0)
+			temp_trainId = train_id - vIndex[i_index - 1];
+
+		cout<<"resize queryId = "<<goodMatches[i].queryIdx<<"  trainId = "<<temp_trainId<<endl;
+        all_matches[i_index].push_back(cv::DMatch(goodMatches[i].queryIdx, temp_trainId, goodMatches[i].distance));
+
+		vp2[i] = fh->shell->mv_Keypoints[goodMatches[i].queryIdx].pt;
+		cv::Point2f p2 = frameHessians[i_index]->shell->mv_Keypoints[temp_trainId].pt;
+		double idepthL = (frameHessians[i_index]->shell->mv_immatureKeypoints[temp_trainId]->idepth_min +
+				frameHessians[i_index]->shell->mv_immatureKeypoints[temp_trainId]->idepth_max)*0.5f;
+		Eigen::Vector3d p3current((p2.x-Hcalib.cxl())/(Hcalib.fxl()*idepthL),
+							      (p2.y-Hcalib.cyl())/(Hcalib.fyl()*idepthL),
+							       1/idepthL);
+		{
+			//boost::unique_lock<boost::mutex> crlock(shellPoseMutex);
+			Eigen::Vector3d p3world = frameHessians[i_index]->shell->camToWorld * p3current;
+			vp3[i] = cv::Point3f(p3world[0], p3world[1], p3world[2]);
+		}
+
+		cout<<i<<"  p2 = "<<vp2[i].x<<"  "<<vp2[i].y<<"  "<<"  p3 = "<<vp3[i].x<<"  "<<vp3[i].y<<"  "<<vp3[i].z<<endl;
+    }
+
+    cout<<"have 3d points size = "<<vp3.size()<<"  2d points size = "<<vp2.size()<<endl;
+
+    if(goodMatches.size() < 10)
+        return SE3();
+
+    cv::Mat K = (cv::Mat_<double>(3,3)<< Hcalib.fxl(), 0, Hcalib.cxl(),
+                                        0,Hcalib.fyl(),Hcalib.cyl(),
+                                        0,0,1);
+    cv::Mat rvec, tvec;
+    cv::solvePnPRansac(vp3, vp2, K, cv::Mat(), rvec, tvec);
+    cv::Mat R;
+    cv::Rodrigues(rvec, R);
+    Mat33 R_mat;
+	R_mat << R.at<double>(0,0), R.at<double>(0,1),R.at<double>(0,2),
+			 R.at<double>(1,0),R.at<double>(1,1),R.at<double>(1,2),
+			 R.at<double>(2,0),R.at<double>(2,1),R.at<double>(2,2);
+    SE3 T_cw(R_mat, Eigen::Vector3d(tvec.at<double>(0,0), tvec.at<double>(1,0), tvec.at<double>(2,0)));
+	cout<<"R = "<<R<<endl<<"R_mat"<<R_mat<<endl;
+
+	if(showDebug) {
+//		for (int i = 0; i < all_matches.size(); i++)
+//			for (int j = 0; j < all_matches[i].size(); j++) {
+//				cout << "i = " << i << "  trainId = " << all_matches[i][j].trainIdx << "  queryId = "
+//					 << all_matches[i][j].queryIdx << "  distance = " << all_matches[i][j].distance << endl;
+//				cout << "train = " << frameHessians[i]->shell->m_matDescriptor.row(all_matches[i][j].trainIdx)
+//					 << "  query = "
+//					 << fh->shell->m_matDescriptor.row(all_matches[i][j].queryIdx) << endl;
+//			}
+		//cout << 3 << endl << frameHessians[3]->shell->m_matDescriptor << endl;
+
+		int id = 0;
+		cv::namedWindow("match");
+		for (auto f : frameHessians) {
+			cv::Mat out;
+			cv::drawMatches(fh->shell->image_mat, fh->shell->mv_Keypoints, f->shell->image_mat, f->shell->mv_Keypoints,
+							all_matches[id++], out);
+			cv::imshow("match", out);
+			cv::waitKey();
+		}
+        cv::destroyWindow("match");
+	}
+
+	cout<<"T_cw = "<<T_cw.unit_quaternion().x()<<"  "
+		<<T_cw.unit_quaternion().y()<<"  "
+		<<T_cw.unit_quaternion().z()<<"  "
+		<<T_cw.unit_quaternion().w()<<"  "
+		<<T_cw.translation()[0]<<"  "
+		<<T_cw.translation()[1]<<"  "
+		<<T_cw.translation()[2]<<endl;
+
+	return T_cw;
+}
 
 void FullSystem::initializeFromInitializer(FrameHessian* newFrame)
 {

@@ -28,6 +28,7 @@
 #include "algorithm"
 #include <opencv/cv.h>
 
+
 #include "DBoW3.h"
 
 namespace dso
@@ -47,10 +48,12 @@ public:
 	cv::Mat image_mat;
 	cv::Mat m_matDescriptor;
 	std::vector<cv::KeyPoint> mv_Keypoints;
-    std::vector<ImmaturePoint*> mv_immatureKeypoints;
-    //std::map<FrameShell*,std::set<FrameShell*> > mm_connected;
-	std::map<FrameShell*,unsigned int> mm_pointsSize;
+    std::vector<ImmaturePoint*> mv_immatureKeypoints;//追踪的特征点
+    Mat66 m_cov;
+
+	std::map<FrameShell*,long unsigned int> mm_pointsSize;//其它FrameShell投影到当前FrameShell的点的个数,当前fm与其它fm共视点的个数
 	DBoW3::BowVector m_BowVec;
+    //DBoW3::EntryId m_bowID;
 
     //float m_translationScale;
 
@@ -81,7 +84,8 @@ public:
 		statistics_outlierResOnThis=statistics_goodResOnThis=0;
 		trackingRef=0;
 		camToTrackingRef = SE3();
-        //m_translationScale = 1;
+        m_cov = Mat66();
+        //m_bowID = -1;
 	}
 //	inline ~FrameShell()
 //	{

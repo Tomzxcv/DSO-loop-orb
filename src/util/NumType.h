@@ -180,7 +180,7 @@ struct AffLight
 			//printf("got exposure value of 0! please choose the correct model.\n");
 			//assert(setting_brightnessTransferFunc < 2);
 		}
-
+		//曝光参数
 		double a = exp(g2T.a-g2F.a) * exposureT / exposureF;
 		double b = g2T.b - a*g2F.b;
 		return Vec2(a,b);

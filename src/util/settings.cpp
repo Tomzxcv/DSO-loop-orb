@@ -31,6 +31,7 @@ namespace dso
 {
 int pyrLevelsUsed = PYR_LEVELS;
 
+bool use_ORB_tracking = true;
 
 /* Parameters controlling when KF's are taken */
 float setting_keyframesPerSecond = 0;   // if !=0, takes a fixed number of KF per second.

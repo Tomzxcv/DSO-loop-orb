@@ -116,6 +116,12 @@ public:
         Output3DWrapper() {}
         virtual ~Output3DWrapper() {}
 
+        virtual int getAllFramePosesSize(){}
+        virtual int getKeyframesSize(){}
+        virtual void setToZero(){}
+        virtual void setKFiPose(int i, SE3 T){}
+        virtual void setCurrentPose(SE3 Tiw){}
+        virtual void setNewfhPose(Vec3f v){}
 
         /*  Usage:
          *  Called once after each new Keyframe is inserted & optimized.

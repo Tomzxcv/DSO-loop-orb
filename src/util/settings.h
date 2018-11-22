@@ -51,6 +51,7 @@ namespace dso
 extern int pyrLevelsUsed;
 
 
+extern bool use_ORB_tracking;
 
 extern float setting_keyframesPerSecond;
 extern bool setting_realTimeMaxKF;

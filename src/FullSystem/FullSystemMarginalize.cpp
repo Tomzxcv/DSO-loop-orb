@@ -37,6 +37,7 @@
 #include <algorithm>
 #include "IOWrapper/ImageDisplay.h"
 #include "util/globalCalib.h"
+#include <fstream>
 
 #include <Eigen/SVD>
 #include <Eigen/Eigenvalues>
@@ -49,6 +50,7 @@
 #include "IOWrapper/Output3DWrapper.h"
 
 #include "FullSystem/CoarseTracker.h"
+#include "util/NumType.h"
 
 namespace dso
 {
@@ -149,7 +151,7 @@ void FullSystem::flagFramesForMarginalization(FrameHessian* newFH)
 
 
 
-void FullSystem::marginalizeFrame(FrameHessian* frame)
+void FullSystem::marginalizeFrame(FrameHessian* frame, std::ofstream* covLog)
 {
 	// marginalize or remove all this frames points.
 
@@ -203,15 +205,15 @@ void FullSystem::marginalizeFrame(FrameHessian* frame)
 	frame->shell->marginalizedAt = frameHessians.back()->shell->id;
 	frame->shell->movedByOpt = frame->w2c_leftEps().norm();
 
+
 	deleteOutOrder<FrameHessian>(frameHessians, frame);
 	for(unsigned int i=0;i<frameHessians.size();i++)
 		frameHessians[i]->idx = i;
 
 
-
-
 	setPrecalcValues();
 	ef->setAdjointsF(&Hcalib);
+
 }
 
 

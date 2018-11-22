@@ -79,6 +79,37 @@ PangolinDSOViewer::~PangolinDSOViewer()
 }
 
 
+void PangolinDSOViewer::setToZero()
+{
+    for(KeyFrameDisplay* kf : keyframes)
+        kf->camToWorld = SE3();
+}
+
+void PangolinDSOViewer::setCurrentPose(SE3 Tiw)
+{
+	if(currentCam == NULL)
+	{
+		printf("set show current frame filed!\n");
+		return;
+	}
+	currentCam->camToWorld = Tiw.inverse();
+}
+
+void PangolinDSOViewer::setKFiPose(int i, SE3 Tiw)
+{
+    if(keyframes[i] == NULL)
+    {
+        printf("set show KF %d filed!\n",i);
+        return;
+    }
+    keyframes[i]->camToWorld = Tiw.inverse();
+}
+
+void PangolinDSOViewer::setNewfhPose(Vec3f v)
+{
+    allFramePoses.back() = v;
+}
+
 void PangolinDSOViewer::run()
 {
 	printf("START PANGOLIN!\n");
@@ -129,7 +160,7 @@ void PangolinDSOViewer::run()
 	pangolin::Var<bool> settings_showKFCameras("ui.KFCam",false,true);
 	pangolin::Var<bool> settings_showCurrentCamera("ui.CurrCam",true,true);
 	pangolin::Var<bool> settings_showTrajectory("ui.Trajectory",true,true);
-	pangolin::Var<bool> settings_showFullTrajectory("ui.FullTrajectory",false,true);
+	pangolin::Var<bool> settings_showFullTrajectory("ui.FullTrajectory",true,true);
 	pangolin::Var<bool> settings_showActiveConstraints("ui.ActiveConst",true,true);
 	pangolin::Var<bool> settings_showAllConstraints("ui.AllConst",false,true);
 
@@ -184,10 +215,10 @@ void PangolinDSOViewer::run()
 
 				refreshed += (int)(fh->refreshPC(refreshed < 10, this->settings_scaledVarTH, this->settings_absVarTH,
 						this->settings_pointCloudMode, this->settings_minRelBS, this->settings_sparsity));
-				fh->drawPC(1);
+				fh->drawPC(1);//绘制点云
 			}
-			if(this->settings_showCurrentCamera) currentCam->drawCam(2,0,0.2);
-			drawConstraints();
+			if(this->settings_showCurrentCamera) currentCam->drawCam(2,0,0.2);//当前Camera
+			drawConstraints();//输出轨迹与点的信息
 			lk3d.unlock();
 		}
 
